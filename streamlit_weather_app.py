@@ -586,13 +586,84 @@ date,avg_temp_f,avg_wind_speed_mph
 def charts_tab():
     """Charts and analysis"""
     st.header("📊 Charts & Analysis")
-    
+
     if st.session_state.ice_data.empty:
         st.info("No data available for charts. Please enter data first.")
         return
-    
+
     df = st.session_state.ice_data
     df['date'] = pd.to_datetime(df['date'])
+
+    # Calculation methodology section
+    with st.expander("📐 Calculation Methodology", expanded=False):
+        st.markdown("""
+        ### Ice Depth Calculation Method
+
+        This application uses **Stefan's Formula** combined with the **Accumulated Freezing Degree Days (AFDD)** method to estimate ice thickness.
+
+        #### Core Formula
+
+        ```
+        Ice Depth (inches) = α × √(Net AFDD) × Wind Factor
+        ```
+
+        Where:
+        - **α (alpha)** = Ice growth coefficient (default: 1.0 inches per √degree-day)
+          - Clear lake ice: 0.8 - 1.1
+          - Snow-covered ice: 0.5 - 0.8
+
+        #### Freezing Degree Days (FDD)
+
+        ```
+        FDD = max(0, 32°F - Average Daily Temperature)
+        ```
+
+        For each day where the average temperature is below freezing (32°F), the FDD equals the number of degrees below freezing.
+
+        #### Thawing Degree Days (TDD)
+
+        ```
+        TDD = max(0, Average Daily Temperature - 32°F)
+        ```
+
+        For each day where the average temperature is above freezing, the TDD equals the number of degrees above freezing.
+
+        #### Net Accumulated Degree Days
+
+        ```
+        Net AFDD = Σ(FDD) - Σ(TDD)
+        ```
+
+        The cumulative sum of freezing degree days minus thawing degree days over time.
+
+        #### Wind Factor
+
+        ```
+        Wind Factor = max(0.7, 1 - (Average Wind Speed / 50))
+        ```
+
+        Wind slows ice formation by causing water movement beneath the ice:
+        - 0 mph wind = no reduction (factor = 1.0)
+        - 15 mph wind = 30% reduction (factor = 0.7, minimum)
+
+        #### Ice Safety Categories
+
+        | Ice Depth | Safety Rating |
+        |-----------|---------------|
+        | < 2 inches | Unsafe - Stay Off |
+        | 2-4 inches | Caution - Walking Only |
+        | 4-5 inches | Ice Fishing (Walking) |
+        | 5-8 inches | Snowmobile/ATV |
+        | 8-12 inches | Car/Light Truck |
+        | 12+ inches | Heavy Vehicle |
+
+        #### Important Caveats
+
+        - These calculations provide **estimates only** and should not replace on-site ice assessment
+        - Ice conditions vary significantly across a body of water
+        - Factors not accounted for: snow cover, water currents, springs, ice quality
+        - Always verify ice conditions locally before venturing out
+        """)
     
     # Ice depth chart
     if PLOTLY_AVAILABLE:
