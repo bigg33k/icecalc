@@ -6,7 +6,6 @@ Includes Weather Underground data scraping
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -145,6 +144,103 @@ def calculate_ice_depth(df, days_per_row=7, alpha=1.0, baseline_depth=0.0, basel
     df_calc['ice_safety'] = df_calc['ice_depth_inches'].apply(ice_safety_category)
 
     return df_calc
+
+STATIONS_PATH = Path(__file__).parent / "stations.csv"
+WU_DASHBOARD_URL = "https://www.wunderground.com/dashboard/pws/"
+
+def load_favorite_stations():
+    """Load the curated station list from stations.csv as a list of (station_id, name)"""
+    if not STATIONS_PATH.exists():
+        return []
+    stations_df = pd.read_csv(STATIONS_PATH, dtype=str).fillna('')
+    return list(zip(stations_df['station_id'].str.strip(), stations_df['name'].str.strip()))
+
+def get_wu_api_key():
+    """Read the Weather Underground API key from st.secrets. Returns None if not configured."""
+    try:
+        return st.secrets["weather_underground"]["api_key"]
+    except Exception:
+        return None
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_nearby_stations(query, api_key):
+    """
+    Find personal weather stations near a town or ZIP code.
+    Geocodes the query with Open-Meteo, then asks the weather.com PWS API for nearby stations.
+    Returns (place_label, [(station_id, label), ...]) or raises on failure.
+    """
+    geo = requests.get(
+        "https://geocoding-api.open-meteo.com/v1/search",
+        params={"name": query, "count": 1},
+        timeout=10,
+    )
+    geo.raise_for_status()
+    results = geo.json().get("results")
+    if not results:
+        return None, []
+    place = results[0]
+    place_label = ", ".join(p for p in [place.get("name"), place.get("admin1"), place.get("country_code")] if p)
+
+    near = requests.get(
+        "https://api.weather.com/v3/location/near",
+        params={
+            "geocode": f"{place['latitude']},{place['longitude']}",
+            "product": "pws",
+            "format": "json",
+            "apiKey": api_key,
+        },
+        timeout=10,
+    )
+    near.raise_for_status()
+    loc = near.json().get("location", {})
+    stations = [
+        (station_id, f"{name} ({distance} mi)")
+        for station_id, name, distance in zip(
+            loc.get("stationId", []), loc.get("stationName", []), loc.get("distanceMi", [])
+        )
+    ]
+    return place_label, stations
+
+def station_selector():
+    """Sidebar station picker: favorites from stations.csv, optional live search, or a custom URL. Returns base URL."""
+    options = {}  # label -> station_id
+    for station_id, name in load_favorite_stations():
+        options[f"⭐ {station_id} — {name}"] = station_id
+
+    api_key = get_wu_api_key()
+    if api_key:
+        query = st.text_input("Find stations near (town or ZIP):", key="station_search")
+        if query.strip():
+            try:
+                place_label, nearby = search_nearby_stations(query.strip(), api_key)
+            except requests.exceptions.RequestException as e:
+                # Don't log str(e): the request URL contains the API key
+                logger.error(f"Station search failed: {type(e).__name__}")
+                st.error("Station search failed. Pick a favorite or enter a URL instead.")
+            else:
+                if place_label is None:
+                    st.warning(f"Couldn't find a place called '{query}'.")
+                else:
+                    st.caption(f"{len(nearby)} station(s) near {place_label}")
+                    favorite_ids = set(options.values())
+                    for station_id, label in nearby:
+                        if station_id not in favorite_ids:
+                            options[f"📍 {station_id} — {label}"] = station_id
+
+    custom_label = "✏️ Custom URL…"
+    selection = st.selectbox(
+        "Station:",
+        list(options) + [custom_label],
+        help="Type to filter. ⭐ = saved in stations.csv, 📍 = search results",
+    )
+
+    if selection == custom_label:
+        return st.text_input(
+            "Station Base URL:",
+            value=f"{WU_DASHBOARD_URL}KMESHAPL32",
+            help="Enter the Weather Underground personal weather station base URL (without /table/...)"
+        )
+    return WU_DASHBOARD_URL + options[selection]
 
 def get_week_dates():
     """
@@ -363,11 +459,7 @@ def main():
 
         # Weather Underground URL input
         st.subheader("Weather Underground")
-        wu_base_url = st.text_input(
-            "Station Base URL:",
-            value="https://www.wunderground.com/dashboard/pws/KMESHAPL32",
-            help="Enter the Weather Underground personal weather station base URL (without /table/...)"
-        )
+        wu_base_url = station_selector()
 
         # Show which weeks will be fetched
         current_week_end, previous_week_end = get_week_dates()
@@ -488,7 +580,7 @@ def render_ad_unit():
     """Render a Google AdSense display ad unit, once an ad slot ID is set"""
     if ADSENSE_SLOT is None:
         return
-    components.html(
+    st.iframe(
         f"""
         <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={ADSENSE_CLIENT}"
              crossorigin="anonymous"></script>

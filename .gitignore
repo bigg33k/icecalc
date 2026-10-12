@@ -13,3 +13,9 @@ __pycache__/
 
 # Temporary files
 *.csv
+
+# Streamlit secrets (API keys)
+.streamlit/secrets.toml
+
+# Curated station list is tracked despite *.csv above
+!stations.csv
