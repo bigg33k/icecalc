@@ -6,6 +6,7 @@ Includes Weather Underground data scraping
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -41,6 +42,11 @@ st.set_page_config(
 # Get logo path
 LOGO_PATH = Path(__file__).parent / "logo.png"
 
+# Monetization
+BUY_ME_A_COFFEE_URL = "https://buymeacoffee.com/deadreckoningtech"
+ADSENSE_CLIENT = "ca-pub-7801151527639579"
+ADSENSE_SLOT = "7826776203"  # "Icecalc" display ad unit
+
 # Initialize session state
 if 'weather_data' not in st.session_state:
     st.session_state.weather_data = pd.DataFrame(columns=['date', 'avg_temp_f', 'avg_wind_speed_mph'])
@@ -48,8 +54,30 @@ if 'ice_data' not in st.session_state:
     st.session_state.ice_data = pd.DataFrame()
 if 'raw_weather_data' not in st.session_state:
     st.session_state.raw_weather_data = pd.DataFrame()
+if 'alpha' not in st.session_state:
+    st.session_state.alpha = 1.0
+if 'baseline_depth' not in st.session_state:
+    st.session_state.baseline_depth = 0.0
+if 'baseline_date' not in st.session_state:
+    st.session_state.baseline_date = None
+if 'use_baseline' not in st.session_state:
+    st.session_state.use_baseline = False
 
-def calculate_ice_depth(df, days_per_row=7):
+
+def recalculate_ice_with_calibration(weather_df, days_per_row=1):
+    """Helper to recalculate ice depth using current calibration settings."""
+    baseline_date = st.session_state.baseline_date if st.session_state.use_baseline else None
+    baseline_depth = st.session_state.baseline_depth if st.session_state.use_baseline else 0.0
+    return calculate_ice_depth(
+        weather_df,
+        days_per_row=days_per_row,
+        alpha=st.session_state.alpha,
+        baseline_depth=baseline_depth,
+        baseline_date=baseline_date
+    )
+
+
+def calculate_ice_depth(df, days_per_row=7, alpha=1.0, baseline_depth=0.0, baseline_date=None):
     """
     Calculate ice depth using a simplified degree-day method
     Based on accumulated freezing degree days (AFDD)
@@ -57,6 +85,9 @@ def calculate_ice_depth(df, days_per_row=7):
     Args:
         df: DataFrame with date, avg_temp_f, avg_wind_speed_mph columns
         days_per_row: Number of days each row represents (7 for weekly data, 1 for daily)
+        alpha: Ice growth coefficient (0.2-1.0). Lower for snow-covered or edge ice.
+        baseline_depth: Measured ice depth in inches to calibrate from
+        baseline_date: Date of the baseline measurement (calculations start from this point)
     """
     if df.empty or 'avg_temp_f' not in df.columns:
         return df
@@ -65,6 +96,13 @@ def calculate_ice_depth(df, days_per_row=7):
     df_calc = df.copy()
     df_calc['date'] = pd.to_datetime(df_calc['date'])
     df_calc = df_calc.sort_values('date').reset_index(drop=True)
+
+    # If baseline date provided, filter to only include data from that date forward
+    if baseline_date is not None:
+        baseline_date = pd.to_datetime(baseline_date)
+        df_calc = df_calc[df_calc['date'] >= baseline_date].reset_index(drop=True)
+        if df_calc.empty:
+            return df_calc
 
     # Calculate freezing degree days (temperatures below 32°F)
     # Multiply by days_per_row to account for weekly averages
@@ -78,18 +116,15 @@ def calculate_ice_depth(df, days_per_row=7):
     # Net accumulated degree days (freezing minus thawing)
     df_calc['net_accumulated_dd'] = df_calc['accumulated_fdd'] - df_calc['accumulated_tdd']
 
-    # Ice depth calculation using Stefan's formula
-    # h = α * sqrt(AFDD) where α is the ice growth coefficient
-    # α ≈ 1.0 for clear lake ice (range: 0.8-1.1 depending on conditions)
-    # Lower values (0.5-0.8) for snow-covered ice
-    alpha = 1.0  # Ice growth coefficient (inches per sqrt(degree-day))
-
     # Wind factor - wind slows ice formation by causing water movement
     # 0 mph = no reduction, 15+ mph = 30% reduction (max)
     wind_factor = np.maximum(0.7, 1 - (df_calc['avg_wind_speed_mph'] / 50))
 
+    # Ice depth calculation using Stefan's formula
+    # h = α * sqrt(AFDD) where α is the ice growth coefficient
+    # Add baseline_depth to start from a known measured value
     df_calc['ice_depth_inches'] = np.maximum(0,
-        alpha * np.sqrt(np.maximum(0, df_calc['net_accumulated_dd'])) * wind_factor
+        baseline_depth + alpha * np.sqrt(np.maximum(0, df_calc['net_accumulated_dd'])) * wind_factor
     )
 
     # Ice safety categories
@@ -354,7 +389,7 @@ def main():
                     weather_df['avg_wind_speed_mph'] = weather_df['avg_wind_speed_mph'].fillna(0)
 
                     st.session_state.weather_data = weather_df
-                    st.session_state.ice_data = calculate_ice_depth(weather_df, days_per_row=1)
+                    st.session_state.ice_data = recalculate_ice_with_calibration(weather_df)
 
                     # Show preview
                     with st.expander("Preview loaded data"):
@@ -367,7 +402,59 @@ def main():
             st.session_state.ice_data = pd.DataFrame()
             st.session_state.raw_weather_data = pd.DataFrame()
             st.success("Data cleared!")
-        
+
+        st.divider()
+
+        # Calibration controls
+        st.subheader("Calibration")
+
+        st.session_state.alpha = st.slider(
+            "Ice Growth Coefficient (α)",
+            min_value=0.2,
+            max_value=1.2,
+            value=st.session_state.alpha,
+            step=0.05,
+            help="Lower values for snow-covered ice (0.5-0.8), edge measurements, or sheltered areas. Higher for clear lake ice (0.8-1.1)."
+        )
+
+        st.session_state.use_baseline = st.checkbox(
+            "Use measured baseline",
+            value=st.session_state.use_baseline,
+            help="Start calculations from a known measured ice depth"
+        )
+
+        if st.session_state.use_baseline:
+            st.session_state.baseline_depth = st.number_input(
+                "Measured Ice Depth (inches)",
+                min_value=0.0,
+                max_value=48.0,
+                value=st.session_state.baseline_depth,
+                step=0.5,
+                help="Enter your measured ice thickness"
+            )
+
+            # Get available dates from weather data
+            if not st.session_state.weather_data.empty:
+                dates = pd.to_datetime(st.session_state.weather_data['date']).dt.date.tolist()
+                default_idx = len(dates) - 1 if dates else 0
+                st.session_state.baseline_date = st.selectbox(
+                    "Measurement Date",
+                    options=dates,
+                    index=default_idx,
+                    help="Select the date when you measured the ice"
+                )
+            else:
+                st.session_state.baseline_date = st.date_input(
+                    "Measurement Date",
+                    value=datetime.now().date(),
+                    help="Select the date when you measured the ice"
+                )
+
+        if st.button("🔄 Recalculate", type="secondary"):
+            if not st.session_state.weather_data.empty:
+                st.session_state.ice_data = recalculate_ice_with_calibration(st.session_state.weather_data)
+                st.success("Recalculated!")
+
         st.divider()
         
         # Download options
@@ -393,6 +480,42 @@ def main():
     
     with tab3:
         charts_tab()
+
+    render_ad_unit()
+    render_footer()
+
+def render_ad_unit():
+    """Render a Google AdSense display ad unit, once an ad slot ID is set"""
+    if ADSENSE_SLOT is None:
+        return
+    components.html(
+        f"""
+        <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client={ADSENSE_CLIENT}"
+             crossorigin="anonymous"></script>
+        <ins class="adsbygoogle"
+             style="display:block"
+             data-ad-client="{ADSENSE_CLIENT}"
+             data-ad-slot="{ADSENSE_SLOT}"
+             data-ad-format="auto"
+             data-full-width-responsive="true"></ins>
+        <script>(adsbygoogle = window.adsbygoogle || []).push({{}});</script>
+        """,
+        height=120,
+    )
+
+def render_footer():
+    """Footer credit and Buy Me a Coffee link"""
+    st.divider()
+    st.markdown(
+        f"<div style='text-align: center;'>"
+        f"<a href='{BUY_ME_A_COFFEE_URL}' target='_blank'>"
+        f"☕ Find this useful? Buy me a coffee</a></div>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<div style='text-align: center; color: gray;'>Brought to you by Dead Reckoning Tech</div>",
+        unsafe_allow_html=True,
+    )
 
 def ice_depth_tab():
     """Ice depth results and safety information"""
@@ -517,7 +640,7 @@ date,avg_temp_f,avg_wind_speed_mph
             parsed_df = parse_pasted_data(pasted_data)
             if parsed_df is not None:
                 st.session_state.weather_data = parsed_df
-                st.session_state.ice_data = calculate_ice_depth(st.session_state.weather_data, days_per_row=1)
+                st.session_state.ice_data = recalculate_ice_with_calibration(st.session_state.weather_data)
                 st.success(f"Successfully processed {len(parsed_df)} rows of data!")
                 st.dataframe(parsed_df, use_container_width=True)
     
@@ -537,7 +660,7 @@ date,avg_temp_f,avg_wind_speed_mph
                     parsed_df = parse_pasted_data(csv_string)
                     if parsed_df is not None:
                         st.session_state.weather_data = parsed_df
-                        st.session_state.ice_data = calculate_ice_depth(st.session_state.weather_data, days_per_row=1)
+                        st.session_state.ice_data = recalculate_ice_with_calibration(st.session_state.weather_data)
                         st.success(f"Successfully processed {len(parsed_df)} rows of data!")
             except Exception as e:
                 st.error(f"Error reading file: {e}")
@@ -571,16 +694,16 @@ date,avg_temp_f,avg_wind_speed_mph
                 else:
                     st.session_state.weather_data = pd.concat([st.session_state.weather_data, new_entry], ignore_index=True)
 
-                st.session_state.ice_data = calculate_ice_depth(st.session_state.weather_data, days_per_row=1)
+                st.session_state.ice_data = recalculate_ice_with_calibration(st.session_state.weather_data)
                 st.success("Entry added successfully!")
     
     # Show current data
     if not st.session_state.weather_data.empty:
         st.subheader("📋 Current Weather Data")
         st.dataframe(st.session_state.weather_data, use_container_width=True, hide_index=True)
-        
+
         if st.button("🔄 Recalculate Ice Depth"):
-            st.session_state.ice_data = calculate_ice_depth(st.session_state.weather_data, days_per_row=1)
+            st.session_state.ice_data = recalculate_ice_with_calibration(st.session_state.weather_data)
             st.success("Ice depth recalculated!")
 
 def charts_tab():
