@@ -39,4 +39,4 @@ Whenever `weather_data` or calibration changes, call `recalculate_ice_with_calib
 
 **Monetization**: `BUY_ME_A_COFFEE_URL`, `ADSENSE_CLIENT` and `ADSENSE_SLOT` are public constants near the top of the file. `render_ad_unit` and `render_footer` run after the tabs.
 
-**UI**: the sidebar holds the station picker, fetch/clear buttons, the alpha slider, baseline calibration, and CSV export. The main area has three tabs: `ice_depth_tab`, `data_entry_tab`, and a charts tab. Plotly is optional (`PLOTLY_AVAILABLE`), and charts fall back to native Streamlit charts without it.
+**UI**: the sidebar holds the station picker, fetch/clear buttons, the alpha slider, baseline calibration, and CSV export. The main area has four tabs: `ice_depth_tab`, `data_entry_tab`, `charts_tab`, and `how_it_works_tab`. `how_it_works_tab` is a user-facing explanation of the method; keep it in sync with `calculate_ice_depth` and README.md. Plotly is optional (`PLOTLY_AVAILABLE`), and charts fall back to native Streamlit charts without it.

@@ -42,6 +42,7 @@ st.set_page_config(
 LOGO_PATH = Path(__file__).parent / "logo.png"
 
 # Monetization
+DEAD_RECKONING_URL = "https://deadreckoningtech.llc"
 BUY_ME_A_COFFEE_URL = "https://buymeacoffee.com/deadreckoningtech"
 ADSENSE_CLIENT = "ca-pub-7801151527639579"
 ADSENSE_SLOT = "7826776203"  # "Icecalc" display ad unit
@@ -639,7 +640,7 @@ def main():
             )
     
     # Create tabs
-    tab1, tab2, tab3 = st.tabs(["🧊 Ice Depth Results", "📝 Data Entry", "📊 Charts & Analysis"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🧊 Ice Depth Results", "📝 Data Entry", "📊 Charts & Analysis", "ℹ️ How It Works"])
     
     with tab1:
         ice_depth_tab()
@@ -649,6 +650,9 @@ def main():
     
     with tab3:
         charts_tab()
+
+    with tab4:
+        how_it_works_tab()
 
     render_ad_unit()
     render_footer()
@@ -682,9 +686,64 @@ def render_footer():
         unsafe_allow_html=True,
     )
     st.markdown(
-        "<div style='text-align: center; color: gray;'>Brought to you by Dead Reckoning Tech</div>",
+        f"<div style='text-align: center; color: gray;'>Brought to you by "
+        f"<a href='{DEAD_RECKONING_URL}' target='_blank'>Dead Reckoning Tech</a></div>",
         unsafe_allow_html=True,
     )
+
+def how_it_works_tab():
+    """Explain the data source, ice depth method, and safety ratings"""
+    st.header("ℹ️ How It Works")
+
+    st.markdown("""
+This calculator estimates lake ice thickness from local weather. It uses a classic method from
+ice engineering: ice grows in proportion to the **square root of the accumulated cold**.
+""")
+
+    st.subheader("1. Get daily weather")
+    st.markdown("""
+Pick a nearby Weather Underground personal weather station in the sidebar, choose a date range,
+and click **Load Data**. The app pulls each day's **average air temperature** and **average wind speed**.
+You can also upload a CSV, paste data, or type days in by hand on the **Data Entry** tab.
+
+**Tip:** start the date range at *freeze-up* (the day the lake iced over). The math adds up cold
+from the first day, so starting mid-winter underestimates the ice.
+""")
+
+    st.subheader("2. Add up the cold (and the thaw)")
+    st.markdown("Each day below 32°F adds **freezing degree days** (FDD); each day above 32°F adds **thawing degree days** (TDD):")
+    st.latex(r"\text{FDD} = \max(0,\ 32 - T_{avg}) \qquad \text{TDD} = \max(0,\ T_{avg} - 32)")
+    st.markdown("A day averaging 12°F adds 20 FDD. These accumulate over the season, with thaws subtracting:")
+    st.latex(r"\text{Net AFDD} = \sum \text{FDD} - \sum \text{TDD}")
+
+    st.subheader("3. Convert cold to ice (Stefan's formula)")
+    st.latex(r"\text{Ice depth (in)} = \text{baseline} + \alpha \times \sqrt{\text{Net AFDD}} \times \text{wind factor}")
+    st.markdown("""
+- **α (ice growth coefficient)**, set in the sidebar: about **0.8–1.1** for clear, snow-free lake ice
+  (default 1.0) and **0.5–0.8** for snow-covered ice. Snow insulates the ice and slows its growth.
+- **Wind factor** = max(0.7, 1 − wind mph ÷ 50). Wind stirs the water under the ice and slows freezing,
+  reducing growth by up to 30% at 15+ mph.
+- **Baseline** (optional): if you've drilled and measured the ice, enter that depth and date under
+  *Calibration*. The calculation then starts from your real measurement, which is the best way
+  to get accurate numbers.
+
+Because of the square root, ice grows fast at first and then slows as it thickens. With α = 1
+and calm wind, 100 FDD gives about 10", but 400 FDD only about 20".
+""")
+
+    st.subheader("4. Rate the ice")
+    st.table(pd.DataFrame({
+        "Ice depth": ["Under 2\"", "2–4\"", "4–5\"", "5–8\"", "8–12\"", "12\"+"],
+        "Rating": ["Unsafe - Stay Off", "Caution - Walking Only", "Ice Fishing (Walking)",
+                   "Snowmobile/ATV", "Car/Light Truck", "Heavy Vehicle"],
+    }).set_index("Ice depth"))
+
+    st.warning("""
+**These are estimates, not a safety guarantee.** Real ice varies across a lake. Springs, currents,
+inlets, pressure ridges, snow cover, and slush all create thin spots this model can't see. Air
+temperature at a weather station also isn't the same as conditions on your lake. **Always drill and
+measure before you go out**, and check with local sources.
+""")
 
 def ice_depth_tab():
     """Ice depth results and safety information"""
