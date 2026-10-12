@@ -201,6 +201,66 @@ def search_nearby_stations(query, api_key):
     ]
     return place_label, stations
 
+def station_id_from_url(base_url):
+    """Extract the station ID (e.g. KMESHAPL32) from a Weather Underground dashboard URL"""
+    match = re.search(r'/pws/([A-Za-z0-9]+)', base_url or '')
+    return match.group(1).upper() if match else None
+
+PWS_HISTORY_MAX_DAYS = 31  # API rejects longer ranges
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_pws_history(station_id, start_date, end_date, api_key):
+    """
+    Fetch daily summaries from the weather.com PWS history API, in 31-day chunks.
+    Returns (DataFrame with date, avg_temp_f, avg_wind_speed_mph, error message or None).
+    """
+    rows = []
+    errors = []
+    chunk_start = start_date
+    while chunk_start <= end_date:
+        chunk_end = min(chunk_start + timedelta(days=PWS_HISTORY_MAX_DAYS - 1), end_date)
+        try:
+            response = requests.get(
+                "https://api.weather.com/v2/pws/history/daily",
+                params={
+                    "stationId": station_id,
+                    "format": "json",
+                    "units": "e",
+                    "startDate": chunk_start.strftime('%Y%m%d'),
+                    "endDate": chunk_end.strftime('%Y%m%d'),
+                    "apiKey": api_key,
+                },
+                timeout=15,
+            )
+            if response.status_code == 204:
+                pass  # No data for this range
+            else:
+                response.raise_for_status()
+                for obs in response.json().get("observations", []):
+                    imperial = obs.get("imperial") or {}
+                    if imperial.get("tempAvg") is None:
+                        continue
+                    rows.append({
+                        'date': obs["obsTimeLocal"][:10],
+                        'avg_temp_f': float(imperial["tempAvg"]),
+                        'avg_wind_speed_mph': float(imperial.get("windspeedAvg") or 0.0),
+                    })
+        except requests.exceptions.RequestException as e:
+            # Don't log str(e): the request URL contains the API key
+            status = getattr(e.response, "status_code", None)
+            logger.error(f"PWS history request failed: {type(e).__name__} {status or ''}")
+            errors.append(f"{chunk_start:%b %d}-{chunk_end:%b %d}: request failed" + (f" (HTTP {status})" if status else ""))
+        chunk_start = chunk_end + timedelta(days=1)
+
+    if not rows:
+        message = f"No data for {station_id} between {start_date:%b %d, %Y} and {end_date:%b %d, %Y}."
+        if errors:
+            message += " " + "; ".join(errors)
+        return None, message
+
+    df = pd.DataFrame(rows).drop_duplicates(subset=['date']).sort_values('date').reset_index(drop=True)
+    return df, "; ".join(errors) if errors else None
+
 def station_selector():
     """Sidebar station picker: favorites from stations.csv, optional live search, or a custom URL. Returns base URL."""
     options = {}  # label -> station_id
@@ -461,13 +521,30 @@ def main():
         st.subheader("Weather Underground")
         wu_base_url = station_selector()
 
-        # Show which weeks will be fetched
-        current_week_end, previous_week_end = get_week_dates()
-        st.caption(f"Will fetch: {previous_week_end.strftime('%b %d')} - {current_week_end.strftime('%b %d, %Y')}")
+        api_key = get_wu_api_key()
+        station_id = station_id_from_url(wu_base_url)
+        if api_key and station_id:
+            today = datetime.now().date()
+            date_range = st.date_input(
+                "Date range:",
+                value=(today - timedelta(days=13), today),
+                max_value=today,
+                help="Start from freeze-up for the most accurate ice depth",
+            )
+        else:
+            # Without an API key, fall back to scraping the current and previous week
+            date_range = None
+            current_week_end, previous_week_end = get_week_dates()
+            st.caption(f"Will fetch: {previous_week_end.strftime('%b %d')} - {current_week_end.strftime('%b %d, %Y')}")
 
         if st.button("📥 Load Data", type="primary"):
-            with st.spinner("Fetching weather data for current and previous week..."):
-                raw_df, error = fetch_weather_underground_data(wu_base_url)
+            with st.spinner("Fetching weather data..."):
+                if date_range is None:
+                    raw_df, error = fetch_weather_underground_data(wu_base_url)
+                elif len(date_range) != 2:
+                    raw_df, error = None, "Pick both a start and an end date."
+                else:
+                    raw_df, error = fetch_pws_history(station_id, date_range[0], date_range[1], api_key)
                 if error and raw_df is None:
                     st.error(error)
                 elif raw_df is not None:
@@ -687,7 +764,7 @@ def ice_depth_tab():
     
     st.dataframe(
         display_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             'Date': st.column_config.TextColumn('Date'),
@@ -734,7 +811,7 @@ date,avg_temp_f,avg_wind_speed_mph
                 st.session_state.weather_data = parsed_df
                 st.session_state.ice_data = recalculate_ice_with_calibration(st.session_state.weather_data)
                 st.success(f"Successfully processed {len(parsed_df)} rows of data!")
-                st.dataframe(parsed_df, use_container_width=True)
+                st.dataframe(parsed_df, width="stretch")
     
     elif entry_method == "📁 Upload CSV File":
         st.subheader("Upload CSV File")
@@ -744,7 +821,7 @@ date,avg_temp_f,avg_wind_speed_mph
             try:
                 df = pd.read_csv(uploaded_file)
                 st.write("Preview of uploaded data:")
-                st.dataframe(df.head(), use_container_width=True)
+                st.dataframe(df.head(), width="stretch")
                 
                 if st.button("📊 Process Uploaded Data"):
                     # Convert to string format for parsing
@@ -792,7 +869,7 @@ date,avg_temp_f,avg_wind_speed_mph
     # Show current data
     if not st.session_state.weather_data.empty:
         st.subheader("📋 Current Weather Data")
-        st.dataframe(st.session_state.weather_data, use_container_width=True, hide_index=True)
+        st.dataframe(st.session_state.weather_data, width="stretch", hide_index=True)
 
         if st.button("🔄 Recalculate Ice Depth"):
             st.session_state.ice_data = recalculate_ice_with_calibration(st.session_state.weather_data)
@@ -886,7 +963,7 @@ def charts_tab():
                       title='Ice Depth Over Time',
                       labels={'ice_depth_inches': 'Ice Depth (inches)', 'date': 'Date'})
         fig1.update_traces(line=dict(color='#4fc3f7', width=3))
-        st.plotly_chart(fig1, use_container_width=True)
+        st.plotly_chart(fig1, width="stretch")
     else:
         st.subheader("🧊 Ice Depth Over Time")
         chart_data = df.set_index('date')[['ice_depth_inches']]
@@ -900,7 +977,7 @@ def charts_tab():
         fig2.add_hline(y=32, line_dash="dash", line_color="red", 
                       annotation_text="Freezing Point (32°F)")
         fig2.update_traces(line=dict(color='#ff6b6b', width=3))
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width="stretch")
     else:
         st.subheader("🌡️ Temperature Over Time")
         chart_data = df.set_index('date')[['avg_temp_f']]
@@ -926,7 +1003,7 @@ def charts_tab():
         fig3.update_yaxes(title_text="Temperature (°F)", secondary_y=True)
         fig3.update_layout(title_text="Ice Depth vs Temperature")
         
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width="stretch")
     
     # Statistics
     st.subheader("📈 Statistics Summary")
@@ -935,12 +1012,12 @@ def charts_tab():
     with col1:
         st.write("**Ice Depth Statistics:**")
         ice_stats = df['ice_depth_inches'].describe()
-        st.dataframe(ice_stats, use_container_width=True)
+        st.dataframe(ice_stats, width="stretch")
     
     with col2:
         st.write("**Temperature Statistics:**")
         temp_stats = df['avg_temp_f'].describe()
-        st.dataframe(temp_stats, use_container_width=True)
+        st.dataframe(temp_stats, width="stretch")
 
 if __name__ == "__main__":
     main()
